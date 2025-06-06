@@ -1,0 +1,76 @@
+name: Build Render96ex for Nintendo Switch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-switch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Mark workspace as safe for Git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # pip install -r requirements.txt  # Uncomment if you have one
+
+      - name: Install devkitPro & devkitA64 (Official Script)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential wget
+          wget https://apt.devkitpro.org/install-devkitpro-pacman
+          chmod +x install-devkitpro-pacman
+          sudo ./install-devkitpro-pacman -y
+          sudo dkp-pacman -Sy
+          sudo dkp-pacman -S --noconfirm devkitA64 libnx switch-tools
+
+      - name: Add devkitPro to PATH
+        run: |
+          echo "/opt/devkitpro/devkitA64/bin" >> $GITHUB_PATH
+
+      - name: Check for baserom
+        run: |
+          if [ ! -f "baserom.us.z64" ]; then
+            echo "ERROR: baserom.us.z64 is missing. Please upload it to the repo root (private repo) or as an artifact before building."
+            exit 1
+          fi
+
+      - name: Build Render96ex for Nintendo Switch
+        run: make TARGET_SWITCH=1
+
+      - name: Upload Switch ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: render96ex-switch-elf
+          path: build/us_switch/*.elf
+
+      - name: Convert ELF to NRO (Optional)
+        if: success()
+        run: |
+          wget https://github.com/devkitPro/elf2nro/releases/download/v1.3/elf2nro_linux
+          chmod +x elf2nro_linux
+          for elf in build/us_switch/*.elf; do
+            ./elf2nro_linux "$elf" "${elf%.elf}.nro"
+          done
+
+      - name: Upload Switch NRO (Optional)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render96ex-switch-nro
+          path: build/us_switch/*.nro
