@@ -1,42 +1,35 @@
 #include <ultra64.h>
 
-#include "sm64.h"
-#include "gfx_dimensions.h"
-#include "memory.h"
-#include "types.h"
+#include "actors/common1.h"
+#include "area.h"
 #include "audio/external.h"
-#include "seq_ids.h"
-#include "dialog_ids.h"
-#include "game_init.h"
-#include "save_file.h"
-#include "level_update.h"
 #include "camera.h"
-#include "text_strings.h"
+#include "course_table.h"
+#include "dialog_ids.h"
+#include "engine/math_util.h"
+#include "eu_translation.h"
+#include "game_init.h"
+#include "gfx_dimensions.h"
+#include "ingame_menu.h"
+#include "level_update.h"
+#include "levels/castle_grounds/header.h"
+#include "memory.h"
+#include "print.h"
+#include "save_file.h"
 #include "segment2.h"
 #include "segment7.h"
-#include "eu_translation.h"
-#include "ingame_menu.h"
-#include "print.h"
-#include "engine/math_util.h"
-#include "course_table.h"
+#include "seq_ids.h"
+#include "sm64.h"
+#include "text_strings.h"
+#include "types.h"
+#include "macros.h"
+#include "pc/cheats.h"
 #ifdef BETTERCAMERA
 #include "bettercamera.h"
 #endif
 #ifdef EXT_OPTIONS_MENU
 #include "options_menu.h"
 #endif
-
-extern Gfx *gDisplayListHead;
-extern s16 gCurrCourseNum;
-extern s16 gCurrSaveFileNum;
-
-extern Gfx coin_seg3_dl_03007940[];
-extern Gfx coin_seg3_dl_03007968[];
-extern Gfx coin_seg3_dl_03007990[];
-extern Gfx coin_seg3_dl_030079B8[];
-
-extern u8 main_menu_seg7_table_0700ABD0[];
-extern Gfx castle_grounds_seg7_dl_0700EA58[];
 
 u16 gDialogColorFadeTimer;
 s8 gLastDialogLineNum;
@@ -116,7 +109,7 @@ s16 gDialogScrollOffsetY = 0;
 s8 gDialogBoxType = DIALOG_TYPE_ROTATE;
 s16 gDialogID = -1;
 s16 gLastDialogPageStrPos = 0;
-s16 gDialogTextPos = 0; // EU: D_802FD64C
+s16 gDialogTextPos = 0;
 #ifdef VERSION_EU
 s32 gInGameLanguage = 0;
 #endif
@@ -126,6 +119,16 @@ u8 gMenuHoldKeyIndex = 0;
 u8 gMenuHoldKeyTimer = 0;
 s32 gDialogResponse = 0;
 
+#if !defined(EXTERNAL_DATA) && (defined(VERSION_JP) || defined(VERSION_SH) || defined(VERSION_EU))
+#ifdef VERSION_EU
+#define CHCACHE_BUFLEN (8 * 8)  // EU only converts 8x8
+#else
+#define CHCACHE_BUFLEN (8 * 16) // JP only converts 8x16 or 16x8 characters
+#endif
+// stores char data unpacked from ia1 to ia8 or ia4
+// so that it won't be reconverted every time a character is rendered
+static struct CachedChar { u8 used; u8 data[CHCACHE_BUFLEN]; } charCache[256];
+#endif // VERSION
 
 void create_dl_identity_matrix(void) {
     Mtx *matrix = (Mtx *) alloc_display_list(sizeof(Mtx));
@@ -205,23 +208,19 @@ void create_dl_ortho_matrix(void) {
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(matrix), G_MTX_PROJECTION | G_MTX_MUL | G_MTX_NOPUSH)
 }
 
-static u8 *alloc_ia8_text_from_i1(u16 *in, s16 width, s16 height) {
+#if defined(VERSION_JP) || defined(VERSION_SH)
+static inline void alloc_ia8_text_from_i1(u8 *out, u16 *in, s16 width, s16 height) {
     s32 inPos;
     u16 bitMask;
-    u8 *out;
+    u16 inWord;
     s16 outPos = 0;
 
-    out = alloc_display_list((u32) width * (u32) height);
-
-    if (out == NULL) {
-        return NULL;
-    }
-
     for (inPos = 0; inPos < (width * height) / 16; inPos++) {
+        inWord = BE_TO_HOST16(in[inPos]);
         bitMask = 0x8000;
 
         while (bitMask != 0) {
-            if (in[inPos] & bitMask) {
+            if (inWord & bitMask) {
                 out[outPos] = 0xFF;
             } else {
                 out[outPos] = 0x00;
@@ -231,9 +230,21 @@ static u8 *alloc_ia8_text_from_i1(u16 *in, s16 width, s16 height) {
             outPos++;
         }
     }
-
-    return out;
 }
+
+static inline u8 *convert_ia8_char(u8 c, u16 *tex, s16 w, s16 h) {
+#ifdef EXTERNAL_DATA
+    return (u8 *)tex; // the data's just a name
+#else
+    if (!tex) return NULL;
+    if (!charCache[c].used) {
+        charCache[c].used = 1;
+        alloc_ia8_text_from_i1(charCache[c].data, tex, w, h);
+    }
+    return charCache[c].data;
+#endif
+}
+#endif
 
 void render_generic_char(u8 c) {
     void **fontLUT;
@@ -246,7 +257,7 @@ void render_generic_char(u8 c) {
     packedTexture = segmented_to_virtual(fontLUT[c]);
 
 #if defined(VERSION_JP) || defined(VERSION_SH)
-    unpackedTexture = alloc_ia8_text_from_i1(packedTexture, 8, 16);
+    unpackedTexture = convert_ia8_char(c, packedTexture, 8, 16);
 
     gDPPipeSync(gDisplayListHead++);
     gDPSetTextureImage(gDisplayListHead++, G_IM_FMT_IA, G_IM_SIZ_8b, 1, VIRTUAL_TO_PHYSICAL(unpackedTexture));
@@ -264,19 +275,11 @@ void render_generic_char(u8 c) {
 }
 
 #ifdef VERSION_EU
-u8 *alloc_ia4_tex_from_i1(u8 *in, s16 width, s16 height) {
+static void alloc_ia4_tex_from_i1(u8 *out, u8 *in, s16 width, s16 height) {
     u32 size = (u32) width * (u32) height;
-    u8 *out;
     s32 inPos;
-    s16 outPos;
+    s16 outPos = 0;
     u8 bitMask;
-
-    outPos = 0;
-    out = (u8 *) alloc_display_list(size);
-
-    if (out == NULL) {
-        return NULL;
-    }
 
     for (inPos = 0; inPos < (width * height) / 4; inPos++) {
         bitMask = 0x80;
@@ -288,8 +291,19 @@ u8 *alloc_ia4_tex_from_i1(u8 *in, s16 width, s16 height) {
             outPos++;
         }
     }
+}
 
-    return out;
+static u8 *convert_ia4_char(u8 c, u8 *tex, s16 w, s16 h) {
+#ifdef EXTERNAL_DATA
+    return tex; // the data's just a name
+#else
+    if (!tex) return NULL;
+    if (!charCache[c].used) {
+        charCache[c].used = 1;
+        alloc_ia4_tex_from_i1(charCache[c].data, tex, w, h);
+    }
+    return charCache[c].data;
+#endif
 }
 
 void render_generic_char_at_pos(s16 xPos, s16 yPos, u8 c) {
@@ -299,7 +313,7 @@ void render_generic_char_at_pos(s16 xPos, s16 yPos, u8 c) {
 
     fontLUT = segmented_to_virtual(main_font_lut);
     packedTexture = segmented_to_virtual(fontLUT[c]);
-    unpackedTexture = alloc_ia4_tex_from_i1(packedTexture, 8, 8);
+    unpackedTexture = convert_ia4_char(c, packedTexture, 8, 8);
 
     gDPPipeSync(gDisplayListHead++);
     gDPSetTextureImage(gDisplayListHead++, G_IM_FMT_IA, G_IM_SIZ_16b, 1, VIRTUAL_TO_PHYSICAL(unpackedTexture));
@@ -338,9 +352,9 @@ enum MultiStringIDs { STRING_THE, STRING_YOU };
  * 1: 'you'
  */
 #ifdef VERSION_US
-void render_multi_text_string(s8 multiTextID) // US: 802D76C8
+void render_multi_text_string(s8 multiTextID)
 #elif defined(VERSION_EU)
-void render_multi_text_string(s16 *xPos, s16 *yPos, s8 multiTextID) // EU: 802AD650
+void render_multi_text_string(s16 *xPos, s16 *yPos, s8 multiTextID)
 #endif
 {
     s8 i;
@@ -400,7 +414,7 @@ void print_generic_string(s16 x, s16 y, const u8 *str) {
             case DIALOG_CHAR_LOWER_A_UMLAUT:
                 render_lowercase_diacritic(&xCoord, &yCoord, ASCII_TO_DIALOG('a'), str[strPos] & 0xF);
                 break;
-            case DIALOG_CHAR_UPPER_A_UMLAUT: // @bug grave and circumflux (0x64-0x65) are absent here
+            case DIALOG_CHAR_UPPER_A_UMLAUT: // @bug grave and circumflex (0x64-0x65) are absent here
                 render_uppercase_diacritic(&xCoord, &yCoord, ASCII_TO_DIALOG('A'), str[strPos] & 0xF);
                 break;
             case DIALOG_CHAR_LOWER_E_GRAVE:
@@ -1005,12 +1019,12 @@ void change_and_flash_dialog_text_color_lines(s8 colorMode, s8 lineNum) {
 
 #ifdef VERSION_EU
 void render_generic_dialog_char_at_pos(struct DialogEntry *dialog, s16 x, s16 y, u8 c) {
-    s16 width;  // sp26
-    s16 height; // sp24
+    s16 width;
+    s16 height;
     s16 tmpX;
     s16 tmpY;
-    s16 xCoord; // sp1E
-    s16 yCoord; // sp1C
+    s16 xCoord;
+    s16 yCoord;
     void **fontLUT;
     void *packedTexture;
     void *unpackedTexture;
@@ -1024,7 +1038,7 @@ void render_generic_dialog_char_at_pos(struct DialogEntry *dialog, s16 x, s16 y,
 
     fontLUT = segmented_to_virtual(main_font_lut);
     packedTexture = segmented_to_virtual(fontLUT[c]);
-    unpackedTexture = alloc_ia4_tex_from_i1(packedTexture, 8, 8);
+    unpackedTexture = convert_ia4_char(c, packedTexture, 8, 8);
 
     gDPSetTextureImage(gDisplayListHead++, G_IM_FMT_IA, G_IM_SIZ_16b, 1, VIRTUAL_TO_PHYSICAL(unpackedTexture));
     gSPDisplayList(gDisplayListHead++, dl_ia_text_tex_settings);
@@ -1798,18 +1812,13 @@ void render_dialog_entries(void) {
     render_dialog_box_type(dialog, dialog->linesPerBox);
 
     gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE,
-
                   0,
                   ensure_nonnegative(DIAG_VAL2 - dialog->width),
 #ifdef VERSION_EU
-
                   SCREEN_WIDTH,
-
                   ensure_nonnegative((240 - dialog->width) + ((dialog->linesPerBox * 80) / DIAG_VAL4) / gDialogBoxScale));
 #else
-
                   SCREEN_WIDTH,
-
                   ensure_nonnegative(240 + ((dialog->linesPerBox * 80) / DIAG_VAL4) - dialog->width));
 #endif
 #if defined(VERSION_JP) || defined(VERSION_SH)
@@ -1984,10 +1993,6 @@ void do_cutscene_handler(void) {
 
     gCutsceneMsgTimer++;
 }
-
-#ifndef VERSION_JP
-extern Gfx castle_grounds_seg7_us_dl_0700F2E8[];
-#endif
 
 #if defined(VERSION_JP) || defined(VERSION_SH)
 #define PEACH_MESSAGE_TIMER 170
@@ -2166,7 +2171,7 @@ void render_pause_red_coins(void) {
 }
 
 #ifdef VERSION_EU
-u8 gTextCourseArr[][7] = { // D_802FDA10
+u8 gTextCourseArr[][7] = {
     { TEXT_COURSE },
     { TEXT_COURSE_FR },
     { TEXT_COURSE_DE }
@@ -2629,8 +2634,9 @@ s16 render_pause_courses_and_castle(void) {
             shade_screen();
             render_pause_my_score_coins();
             render_pause_red_coins();
-
-            if (gMarioStates[0].action & ACT_FLAG_PAUSE_EXIT) {
+            
+/* Added support for the "Exit course at any time" cheat */
+            if ((gMarioStates[0].action & ACT_FLAG_PAUSE_EXIT) || (Cheats.EnableCheats && Cheats.ExitAnywhere)) {
                 render_pause_course_options(99, 93, &gDialogLineNum, 15);
             }
 
@@ -3084,10 +3090,9 @@ s16 render_menus_and_dialogs() {
 
         gDialogColorFadeTimer = (s16) gDialogColorFadeTimer + 0x1000;
     } else if (gDialogID != -1) {
-        // Peach message "Dear Mario" new game dialog
+        // The Peach "Dear Mario" message needs to be repositioned separately
         if (gDialogID == 20) {
-            print_peach_letter_message(); // the peach message needs to be
-                                          // repositioned seperately
+            print_peach_letter_message();
             return mode;
         }
 

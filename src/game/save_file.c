@@ -1,5 +1,4 @@
 #include <ultra64.h>
-
 #include "sm64.h"
 #include "game_init.h"
 #include "main.h"
@@ -11,15 +10,11 @@
 #include "level_table.h"
 #include "course_table.h"
 #include "thread6.h"
+#include "macros.h"
+#include "pc/ini.h"
 
 #define MENU_DATA_MAGIC 0x4849
 #define SAVE_FILE_MAGIC 0x4441
-
-#define BSWAP16(x) \
-    ( (((x) >> 8) & 0x00FF) | (((x) << 8) & 0xFF00) )
-#define BSWAP32(x)   \
-    ( (((x) >> 24) & 0x000000FF) | (((x) >>  8) & 0x0000FF00) | \
-      (((x) <<  8) & 0x00FF0000) | (((x) << 24) & 0xFF000000) )
 
 STATIC_ASSERT(sizeof(struct SaveBuffer) == EEPROM_SIZE, "eeprom buffer size must match");
 
@@ -49,6 +44,12 @@ s8 gLevelToCourseNumTable[] = {
 
 STATIC_ASSERT(ARRAY_COUNT(gLevelToCourseNumTable) == LEVEL_COUNT - 1,
               "change this array if you are adding levels");
+
+#ifdef TEXTSAVES
+
+#include "text_save.inc.h"
+
+#endif
 
 // This was probably used to set progress to 100% for debugging, but
 // it was removed from the release ROM.
@@ -102,14 +103,10 @@ static s32 read_eeprom_data(void *buffer, s32 size) {
         u32 offset = (u32)((u8 *) buffer - (u8 *) &gSaveBuffer) / 8;
 
         do {
-#ifdef VERSION_SH
             block_until_rumble_pak_free();
-#endif
             triesLeft--;
             status = osEepromLongRead(&gSIEventMesgQueue, offset, buffer, size);
-#ifdef VERSION_SH
             release_rumble_pak_control();
-#endif
         } while (triesLeft > 0 && status != 0);
     }
 
@@ -130,14 +127,10 @@ static s32 write_eeprom_data(void *buffer, s32 size, const uintptr_t baseofs) {
         u32 offset = (u32)baseofs >> 3;
 
         do {
-#ifdef VERSION_SH
             block_until_rumble_pak_free();
-#endif
             triesLeft--;
             status = osEepromLongWrite(&gSIEventMesgQueue, offset, buffer, size);
-#ifdef VERSION_SH
             release_rumble_pak_control();
-#endif
         } while (triesLeft > 0 && status != 0);
     }
 
@@ -177,7 +170,6 @@ static inline s32 write_eeprom_menudata(const u32 slot, const u32 num) {
     return write_eeprom_data(&md, sizeof(md), ofs);
 #endif
 }
-
 
 /**
  * Sum the bytes in data to data + size - 2. The last two bytes are ignored
@@ -242,7 +234,7 @@ static void save_main_menu_data(void) {
         bcopy(&gSaveBuffer.menuData[0], &gSaveBuffer.menuData[1], sizeof(gSaveBuffer.menuData[1]));
 
         // Write to EEPROM
-         write_eeprom_menudata(0, 2);
+        write_eeprom_menudata(0, 2);
 
         gMainMenuDataModified = FALSE;
     }
@@ -350,7 +342,19 @@ static void save_file_bswap(struct SaveBuffer *buf) {
 }
 
 void save_file_do_save(s32 fileIndex) {
-    if (gSaveFileModified) {
+    if (fileIndex < 0 || fileIndex >= NUM_SAVE_FILES)
+        return;
+
+    if (gSaveFileModified)
+#ifdef TEXTSAVES
+    {
+        // Write to text file
+        write_text_save(fileIndex);
+        gSaveFileModified = FALSE;
+        gMainMenuDataModified = FALSE;
+    }
+#else 
+    {
         // Compute checksum
         add_save_block_signature(&gSaveBuffer.files[fileIndex][0],
                                  sizeof(gSaveBuffer.files[fileIndex][0]), SAVE_FILE_MAGIC);
@@ -361,14 +365,17 @@ void save_file_do_save(s32 fileIndex) {
 
         // Write to EEPROM
         write_eeprom_savefile(fileIndex, 0, 2);
-
+        
         gSaveFileModified = FALSE;
     }
-
     save_main_menu_data();
+#endif
 }
 
 void save_file_erase(s32 fileIndex) {
+    if (fileIndex < 0 || fileIndex >= NUM_SAVE_FILES)
+        return;
+
     touch_high_score_ages(fileIndex);
     bzero(&gSaveBuffer.files[fileIndex][0], sizeof(gSaveBuffer.files[fileIndex][0]));
 
@@ -378,7 +385,8 @@ void save_file_erase(s32 fileIndex) {
 
 //! Needs to be s32 to match on -O2, despite no return value.
 BAD_RETURN(s32) save_file_copy(s32 srcFileIndex, s32 destFileIndex) {
-    UNUSED s32 pad;
+    if (srcFileIndex < 0 || srcFileIndex >= NUM_SAVE_FILES || destFileIndex < 0 || destFileIndex >= NUM_SAVE_FILES)
+        return;
 
     touch_high_score_ages(destFileIndex);
     bcopy(&gSaveBuffer.files[srcFileIndex][0], &gSaveBuffer.files[destFileIndex][0],
@@ -390,12 +398,20 @@ BAD_RETURN(s32) save_file_copy(s32 srcFileIndex, s32 destFileIndex) {
 
 void save_file_load_all(void) {
     s32 file;
-    s32 validSlots;
 
     gMainMenuDataModified = FALSE;
     gSaveFileModified = FALSE;
 
     bzero(&gSaveBuffer, sizeof(gSaveBuffer));
+
+#ifdef TEXTSAVES
+    for (file = 0; file < NUM_SAVE_FILES; file++) {
+        read_text_save(file);
+    }
+    gSaveFileModified = TRUE;
+    gMainMenuDataModified = TRUE;
+#else
+    s32 validSlots;
     read_eeprom_data(&gSaveBuffer, sizeof(gSaveBuffer));
 
     if (save_file_need_bswap(&gSaveBuffer))
@@ -432,7 +448,7 @@ void save_file_load_all(void) {
                 break;
         }
     }
-
+#endif // TEXTSAVES
     stub_save_file_1();
 }
 
@@ -602,7 +618,7 @@ u32 save_file_get_star_flags(s32 fileIndex, s32 courseIndex) {
 
 /**
  * Add to the bitset of obtained stars in the specified course.
- * If course is -1, add ot the bitset of obtained castle secret stars.
+ * If course is -1, add to the bitset of obtained castle secret stars.
  */
 void save_file_set_star_flags(s32 fileIndex, s32 courseIndex, u32 starFlags) {
     if (courseIndex == -1) {
@@ -693,6 +709,9 @@ void eu_set_language(u16 language) {
 }
 
 u16 eu_get_language(void) {
+    // check if the language is in range, in case we loaded a US save with garbage padding or something
+    if (gSaveBuffer.menuData[0].language >= LANGUAGE_MAX)
+        eu_set_language(LANGUAGE_ENGLISH); // reset it to english if not
     return gSaveBuffer.menuData[0].language;
 }
 #endif
@@ -734,7 +753,7 @@ s32 check_warp_checkpoint(struct WarpNode *warpNode) {
         warpNode->destNode = gWarpCheckpoint.warpNode;
         isWarpCheckpointActive = TRUE;
     } else {
-        // Disable the warp checkpoint just incase the other 2 conditions failed?
+        // Disable the warp checkpoint just in case the other 2 conditions failed?
         gWarpCheckpoint.courseNum = COURSE_NONE;
     }
 

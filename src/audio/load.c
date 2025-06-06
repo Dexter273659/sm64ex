@@ -1,10 +1,13 @@
 #include <ultra64.h>
-#include <macros.h>
 
-#include "load.h"
-#include "heap.h"
 #include "data.h"
+#include "external.h"
+#include "heap.h"
+#include "load.h"
 #include "seqplayer.h"
+
+#include "pc/platform.h"
+#include "pc/fs/fs.h"
 
 #define ALIGN16(val) (((val) + 0xF) & ~0xF)
 
@@ -868,6 +871,22 @@ void load_sequence_internal(u32 player, u32 seqId, s32 loadAsync) {
     seqPlayer->scriptState.pc = sequenceData;
 }
 
+#ifdef EXTERNAL_DATA
+# define LOAD_DATA(x) load_sound_res((const char *)x)
+# include <stdio.h>
+# include <stdlib.h>
+static inline void *load_sound_res(const char *path) {
+    void *data = fs_load_file(path, NULL);
+    if (!data) sys_fatal("could not load sound data from '%s'", path);
+    // FIXME: figure out where it is safe to free this shit
+    //        can't free it immediately after in audio_init()
+    return data;
+}
+#else
+# define LOAD_DATA(x) x
+#endif
+
+// (void) must be omitted from parameters
 void audio_init() {
 #ifdef VERSION_EU
     UNUSED s8 pad[16];
@@ -875,13 +894,13 @@ void audio_init() {
     UNUSED s8 pad[32];
     u8 buf[0x10];
 #endif
-    s32 i, j, k;
+    s32 i, j, UNUSED k;
     UNUSED s32 lim1; // lim1 unused in EU
 #ifdef VERSION_EU
     u8 buf[0x10];
     s32 UNUSED lim2, lim3;
 #else
-    s32 lim2, lim3;
+    s32 lim2, UNUSED lim3;
 #endif
     u32 size;
     UNUSED u64 *ptr64;
@@ -901,25 +920,9 @@ void audio_init() {
     for (i = 0; i <= lim2 / 8 - 1; i++) {
         ((u64 *) gAudioHeap)[i] = 0;
     }
-
-#ifndef AVOID_UB
-    i = 0;
-    lim3 = ((uintptr_t) &gAudioGlobalsEndMarker - (uintptr_t) &gAudioGlobalsStartMarker) / 8;
-    ptr64 = &gAudioGlobalsStartMarker - 1;
-    for (k = lim3; k >= 0; k--) {
-        i++;
-        ptr64[i] = 0;
-    }
-#endif
 #else
     for (i = 0; i < gAudioHeapSize / 8; i++) {
         ((u64 *) gAudioHeap)[i] = 0;
-    }
-
-    lim3 = ((uintptr_t) &gAudioGlobalsEndMarker - (uintptr_t) &gAudioGlobalsStartMarker) / 8;
-    ptr64 = &gAudioGlobalsStartMarker;
-    for (k = lim3; k >= 0; k--) {
-        *ptr64++ = 0;
     }
 
     D_EU_802298D0 = 20.03042f;
@@ -966,7 +969,7 @@ void audio_init() {
 
     // Load header for sequence data (assets/music_data.sbk.s)
     gSeqFileHeader = (ALSeqFile *) buf;
-    data = gMusicData;
+    data = LOAD_DATA(gMusicData);
     audio_dma_copy_immediate((uintptr_t) data, gSeqFileHeader, 0x10);
     gSequenceCount = gSeqFileHeader->seqCount;
 #ifdef VERSION_EU
@@ -981,7 +984,7 @@ void audio_init() {
 
     // Load header for CTL (assets/sound_data.ctl.s, i.e. ADSR)
     gAlCtlHeader = (ALSeqFile *) buf;
-    data = gSoundDataADSR;
+    data = LOAD_DATA(gSoundDataADSR);
     audio_dma_copy_immediate((uintptr_t) data, gAlCtlHeader, 0x10);
     size = gAlCtlHeader->seqCount * sizeof(ALSeqData) + 4;
     size = ALIGN16(size);
@@ -996,12 +999,15 @@ void audio_init() {
     size = gAlTbl->seqCount * sizeof(ALSeqData) + 4;
     size = ALIGN16(size);
     gAlTbl = soundAlloc(&gAudioInitPool, size);
-    audio_dma_copy_immediate((uintptr_t) gSoundDataRaw, gAlTbl, size);
-    alSeqFileNew(gAlTbl, gSoundDataRaw);
+
+    data = LOAD_DATA(gSoundDataRaw);
+    audio_dma_copy_immediate((uintptr_t) data, gAlTbl, size);
+    alSeqFileNew(gAlTbl, data);
 
     // Load bank sets for each sequence (assets/bank_sets.s)
+    data = LOAD_DATA(gBankSetsData);
     gAlBankSets = soundAlloc(&gAudioInitPool, 0x100);
-    audio_dma_copy_immediate((uintptr_t) gBankSetsData, gAlBankSets, 0x100);
+    audio_dma_copy_immediate((uintptr_t) data, gAlBankSets, 0x100);
 
     init_sequence_players();
     gAudioLoadLock = AUDIO_LOCK_NOT_LOADING;
